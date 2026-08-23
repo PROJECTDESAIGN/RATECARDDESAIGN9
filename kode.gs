@@ -1,7 +1,7 @@
 /**
- * Google Apps Script Backend — Creator Portfolio & Rate Card v3
+ * Google Apps Script Backend — Creator Portfolio & Rate Card v3 (Universal API)
  *
- * Perubahan v3 (Video Uploader):
+ * Perubahan v3 (Video Uploader + Universal API Support):
  *   - Skema video baru: videoUrl, embedUrl, sourceType, durationSeconds
  *     (backward-compatible dengan data lama)
  *   - normalizeVideoUrl_() : deteksi platform sosmed (YouTube / TikTok /
@@ -13,6 +13,9 @@
  *   - Batas ukuran per-file 25 MB (batas keras Apps Script).
  *   - Baris yang meng-clear blob: dihapus — video lokal wajib sudah di-upload
  *     via uploadAsset() sebelum saveData().
+ *   - Dual Mode doGet() & doPost():
+ *     • Melayani web page index.html saat diakses di browser GAS.
+ *     • Melayani REST & JSONP API saat diakses dari Netlify / GitHub Pages / hosting eksternal.
  *
  * File HTML harus diberi nama "index.html" (atau "Index.html" — GAS
  * tidak case-sensitive untuk createTemplateFromFile) agar doGet() dapat
@@ -41,14 +44,126 @@ var ALLOWED_IMAGE_MIME = ['image/jpeg', 'image/jpg', 'image/png', 'image/webp', 
 var PROPERTY_CHUNK_SIZE = 2000;
 var PROPERTY_TOTAL_LIMIT = 450000; // di bawah batas total 500 KB
 
+/* ================================================================
+   ROUTING: doGet & doPost (DUAL MODE: Web App & API)
+================================================================ */
+
+function apiResponse_(data, callback) {
+  var json = JSON.stringify(data);
+  if (callback && String(callback).trim()) {
+    var cb = String(callback).replace(/[^\w$.]/g, '');
+    return ContentService.createTextOutput(cb + '(' + json + ');')
+      .setMimeType(ContentService.MimeType.JAVASCRIPT);
+  }
+  return ContentService.createTextOutput(json)
+    .setMimeType(ContentService.MimeType.JSON);
+}
+
 function doGet(e) {
-  // Catatan: addMetaTag hanya mendukung 'keywords' dan 'description'.
-  // Meta viewport, theme-color, apple-* sudah ditulis langsung di Index.html.
+  // FUNGSI 2: Jika dipanggil untuk API data (?action=getData dll)
+  if (e && e.parameter && e.parameter.action) {
+    var action = e.parameter.action;
+    var cb = e.parameter.callback || e.parameter.prefix || '';
+
+    if (action === 'getData') {
+      return apiResponse_({ success: true, data: getData() }, cb);
+    }
+    if (action === 'verifyPin' || action === 'verifyAdminPin') {
+      return apiResponse_(verifyAdminPin(e.parameter.pin), cb);
+    }
+    if (action === 'getInvoices') {
+      return apiResponse_(getInvoices(e.parameter.token), cb);
+    }
+    if (action === 'detectVideo') {
+      return apiResponse_(detectVideoUrl(e.parameter.url), cb);
+    }
+    if (action === 'resetData') {
+      return apiResponse_(resetData(), cb);
+    }
+  }
+
+  // FUNGSI 1: Ketika URL Web App dibuka normal -> tampilkan index.html
   var output = HtmlService.createTemplateFromFile('index')
     .evaluate()
-    .setTitle('Creator Portfolio & Rate Card')
+    .setTitle('Creator Portfolio & Rate Card – Deep Plum')
     .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
   return output;
+}
+
+function doPost(e) {
+  try {
+    var payload = {};
+    if (e && e.postData && e.postData.contents) {
+      try {
+        payload = JSON.parse(e.postData.contents);
+      } catch (pe) {
+        payload = e.parameter || {};
+      }
+    } else if (e && e.parameter) {
+      payload = e.parameter;
+    }
+
+    var action = payload.action || (e && e.parameter && e.parameter.action) || '';
+    var args = payload.args || [];
+    var cb = payload.callback || (e && e.parameter && e.parameter.callback) || '';
+
+    if (action === 'getData') {
+      return apiResponse_({ success: true, data: getData() }, cb);
+    }
+    if (action === 'verifyAdminPin' || action === 'verifyPin') {
+      var pin = payload.pin || args[0] || '';
+      return apiResponse_(verifyAdminPin(pin), cb);
+    }
+    if (action === 'saveData') {
+      var data = payload.data || args[0];
+      var token = payload.token || args[1] || '';
+      return apiResponse_(saveData(data, token), cb);
+    }
+    if (action === 'uploadAsset') {
+      var dataUri = payload.dataUri || args[0];
+      var fileName = payload.fileName || args[1];
+      var mimeType = payload.mimeType || args[2];
+      var authToken = payload.token || args[3];
+      var durationSec = payload.durationSeconds || args[4];
+      return apiResponse_(uploadAsset(dataUri, fileName, mimeType, authToken, durationSec), cb);
+    }
+    if (action === 'submitInquiry') {
+      var formData = payload.formData || payload.data || args[0] || payload;
+      return apiResponse_(submitInquiry(formData), cb);
+    }
+    if (action === 'getInvoices') {
+      var invTok = payload.token || args[0] || '';
+      return apiResponse_(getInvoices(invTok), cb);
+    }
+    if (action === 'saveInvoice') {
+      var invData = payload.invoiceData || payload.data || args[0];
+      var saveTok = payload.token || args[1] || '';
+      return apiResponse_(saveInvoice(invData, saveTok), cb);
+    }
+    if (action === 'deleteInvoice') {
+      var invId = payload.id || args[0] || '';
+      var delTok = payload.token || args[1] || '';
+      return apiResponse_(deleteInvoice(invId, delTok), cb);
+    }
+    if (action === 'generateInvoicePdf') {
+      var pdfId = payload.id || args[0] || '';
+      var pdfTok = payload.token || args[1] || '';
+      var pdfSig = payload.signatureDataUrl || args[2] || '';
+      return apiResponse_(generateInvoicePdf(pdfId, pdfTok, pdfSig), cb);
+    }
+    if (action === 'detectVideo') {
+      var vidUrl = payload.url || args[0] || '';
+      return apiResponse_(detectVideoUrl(vidUrl), cb);
+    }
+    if (action === 'resetData') {
+      return apiResponse_(resetData(), cb);
+    }
+
+    return apiResponse_({ success: false, message: 'Action tidak dikenal: ' + action }, cb);
+  } catch (err) {
+    Logger.log('doPost error: ' + err);
+    return apiResponse_({ success: false, message: 'Server error: ' + err.toString() }, '');
+  }
 }
 
 function onOpen(e) {
@@ -139,28 +254,23 @@ function cloneObject_(value) {
 }
 
 function normalizeContactInfo_(items) {
-  var source = Array.isArray(items) ? items : [];
-  var result = source.map(function(item) {
-    if (!item || typeof item !== 'object') return {};
-    // Pastikan setiap item memiliki field yang dibutuhkan tanpa menimpa data user.
-    if (item.icon === undefined) item.icon = 'info';
-    if (item.label === undefined) item.label = 'LABEL';
-    if (item.value === undefined) item.value = '';
-    if (item.href === undefined) item.href = '';
-    return item;
-  });
-
-  // Jika benar-benar kosong, isi dengan contoh default agar UI tidak rusak.
-  if (result.length === 0) {
-    result = [
+  if (items === null || items === undefined) {
+    return [
       { icon: 'youtube', label: 'YOUTUBE', value: '@safwasakilla', href: 'https://youtube.com/@safwasakilla' },
       { icon: 'twitter', label: 'TWITTER / X', value: '@safwasakilla', href: 'https://x.com/safwasakilla' },
       { icon: 'instagram', label: 'INSTAGRAM', value: '@safwasakilla', href: 'https://instagram.com/safwasakilla' },
       { icon: 'music', label: 'TIKTOK', value: '@safwasakilla', href: 'https://tiktok.com/@safwasakilla' }
     ];
   }
-
-  return result;
+  var source = Array.isArray(items) ? items : [];
+  return source.map(function(item) {
+    if (!item || typeof item !== 'object') return {};
+    if (item.icon === undefined) item.icon = 'info';
+    if (item.label === undefined) item.label = 'LABEL';
+    if (item.value === undefined) item.value = '';
+    if (item.href === undefined) item.href = '';
+    return item;
+  });
 }
 
 /* ================================================================
@@ -348,9 +458,9 @@ function getAdminPin_() {
 
 function verifyAdminPin(pin) {
   try {
-    var cache = CacheService.getUserCache();
+    var cache = CacheService.getScriptCache();
     var attempts = Number(cache.get(ADMIN_ATTEMPT_KEY) || 0);
-    if (attempts >= 5) {
+    if (attempts >= 10) {
       return { success: false, message: 'Terlalu banyak percobaan. Coba lagi dalam beberapa menit.' };
     }
 
@@ -363,7 +473,10 @@ function verifyAdminPin(pin) {
     cache.remove(ADMIN_ATTEMPT_KEY);
     var token = Utilities.getUuid();
     cache.put(ADMIN_SESSION_PREFIX + token, '1', ADMIN_SESSION_TTL_SECONDS);
-    Logger.log('Sesi admin berhasil dibuat.');
+    if (CacheService.getUserCache()) {
+      CacheService.getUserCache().put(ADMIN_SESSION_PREFIX + token, '1', ADMIN_SESSION_TTL_SECONDS);
+    }
+    Logger.log('Sesi admin berhasil dibuat: ' + token);
     return { success: true, token: token };
   } catch (err) {
     Logger.log('verifyAdminPin error: ' + err);
@@ -372,8 +485,13 @@ function verifyAdminPin(pin) {
 }
 
 function isAdminSessionValid_(token) {
-  return Boolean(token) &&
-    CacheService.getUserCache().get(ADMIN_SESSION_PREFIX + String(token)) === '1';
+  if (!token) return false;
+  var tok = String(token);
+  var sCache = CacheService.getScriptCache();
+  var uCache = CacheService.getUserCache();
+  if (sCache && sCache.get(ADMIN_SESSION_PREFIX + tok) === '1') return true;
+  if (uCache && uCache.get(ADMIN_SESSION_PREFIX + tok) === '1') return true;
+  return false;
 }
 
 /* ================================================================
@@ -556,7 +674,7 @@ function saveData(newData, authToken) {
     Logger.log('Data disimpan: ' + new Date().toISOString());
     return {
       success: true,
-      message: 'Data berhasil disimpan!',
+      message: 'Data berhasil disimpan ke Google Apps Script!',
       warning: warnings.length ? warnings.join(' ') : '',
       savedAt: new Date().toISOString(),
       data: removePrivateFields_(cleanData)
@@ -697,7 +815,7 @@ function submitInquiry(formData) {
         ]]);
         sheet.getRange(1, 1, 1, 6)
           .setFontWeight('bold')
-          .setBackground('#4a6741')
+          .setBackground('#0090A8')
           .setFontColor('#ffffff');
         sheet.setFrozenRows(1);
       }
@@ -887,90 +1005,85 @@ function generateInvoicePdf(id, authToken, signatureDataUrl) {
       sigUrl = inv.signatureDataUrl;
     }
 
-    // Blok HTML tanda tangan creator — ukuran diperbesar agar standar dan jelas di PDF
-var creatorSignHtml = sigUrl
-  ? '<img src="' + sigUrl + '" alt="Tanda Tangan" style="max-width:500px;max-height:290px;width:auto;height:auto;display:block;margin:0 auto 4px;object-fit:contain">'
-  : '<div style="height:290px"></div>';
+    // Blok HTML tanda tangan creator
+    var creatorSignHtml = sigUrl
+      ? '<img src="' + sigUrl + '" alt="Tanda Tangan" style="max-width:500px;max-height:290px;width:auto;height:auto;display:block;margin:0 auto 4px;object-fit:contain">'
+      : '<div style="height:290px"></div>';
 
-var htmlContent = '<!DOCTYPE html><html lang="id"><head><meta charset="UTF-8">' +
-  '<title>Invoice ' + inv.invoiceNumber + '</title>' +
-  '<style>' +
-    'body{margin:0;padding:0;font-family:Arial,sans-serif;font-size:13px;color:#222}' +
-    '.page{max-width:740px;margin:0 auto;padding:40px 44px}' +
-    /* Border & aksen utama menggunakan warna Hijau Telur Asin (#5B9A8B) */
-    '.header{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:32px;padding-bottom:20px;border-bottom:3px solid #5B9A8B}' +
-    '.brand-col h1{margin:0 0 4px;font-size:24px;color:#5B9A8B;letter-spacing:.02em}' +
-    '.brand-col p{margin:2px 0;font-size:11px;color:#666}' +
-    '.inv-meta{text-align:right}' +
-    '.inv-meta .inv-num{font-size:18px;font-weight:700;color:#5B9A8B;margin-bottom:4px}' +
-    '.inv-meta p{margin:2px 0;font-size:11px;color:#666}' +
-    '.section-title{font-size:10px;font-weight:800;text-transform:uppercase;letter-spacing:.1em;color:#5B9A8B;margin:22px 0 8px}' +
-    /* Background info box disesuaikan dengan tone hijau telur asin soft (#F2F8F6) */
-    '.info-box{background:#F2F8F6;border:1px solid #D2E7E2;border-radius:8px;padding:14px 18px}' +
-    '.info-row{display:flex;gap:8px;margin-bottom:6px;font-size:13px}' +
-    '.info-row:last-child{margin-bottom:0}' +
-    '.info-label{flex:0 0 150px;color:#666;font-size:12px}' +
-    '.info-value{flex:1;font-weight:600;color:#222}' +
-    /* Box paket utama dengan warna Hijau Telur Asin (#5B9A8B) */
-    '.paket-box{background:#5B9A8B;color:#fff;border-radius:8px;padding:16px 18px;margin:12px 0}' +
-    '.paket-box .paket-name{font-size:16px;font-weight:700;margin-bottom:4px}' +
-    /* Box syarat & ketentuan */
-    '.syarat-box{background:#F8FCFA;border:1px solid #E1EFF3;border-radius:8px;padding:14px 18px;line-height:1.7;font-size:12px;color:#444}' +
-    /* Box transfer disesuaikan ke nuansa soft teal/mint (#E8F3F1) */
-    '.transfer-box{display:flex;align-items:center;gap:16px;background:#E8F3F1;border:1px solid #B8DDD6;border-radius:8px;padding:14px 18px}' +
-    '.transfer-icon{font-size:28px}' +
-    '.transfer-label{font-size:10px;color:#666;font-weight:800;text-transform:uppercase;letter-spacing:.08em}' +
-    '.transfer-value{font-size:15px;font-weight:700;color:#396A5E;letter-spacing:.04em}' +
-    '.footer{margin-top:40px;padding-top:16px;border-top:1px solid #D2E7E2;display:flex;justify-content:space-between;font-size:11px;color:#888}' +
-    '.sign-area{margin-top:48px;display:flex;justify-content:space-between;gap:24px}' +
-    '.sign-block{text-align:center;flex:0 0 200px}' +
-    '.sign-block .sign-img-wrap{min-height:290px;display:flex;align-items:flex-end;justify-content:center;margin-bottom:0}' +
-    '.sign-block .sign-line{width:180px;border-top:1px solid #aaa;margin:6px auto 6px}' +
-    '.sign-block .sign-label{font-size:11px;color:#666}' +
-    '@media print{body{-webkit-print-color-adjust:exact;print-color-adjust:exact}}' +
-  '</style></head><body><div class="page">' +
-    '<div class="header">' +
-      '<div class="brand-col"><h1>' + creatorName + '</h1>' +
-        '<p>Creator Portfolio &amp; Media Kit</p>' +
-        (creatorLocation ? '<p>' + creatorLocation + '</p>' : '') +
-        (creatorEmail ? '<p>' + creatorEmail + '</p>' : '') +
-      '</div>' +
-      '<div class="inv-meta">' +
-        '<div class="inv-num">' + inv.invoiceNumber + '</div>' +
-        '<p>Tanggal Dibuat: ' + createdFormatted + '</p>' +
-      '</div>' +
-    '</div>' +
-    '<div class="section-title">Data Pelanggan</div>' +
-    '<div class="info-box">' +
-      '<div class="info-row"><span class="info-label">Nama Pelanggan</span><span class="info-value">' + (inv.namaPelanggan || '-') + '</span></div>' +
-      '<div class="info-row"><span class="info-label">Tanggal Kerja Sama</span><span class="info-value">' + tanggalFormatted + '</span></div>' +
-    '</div>' +
-    '<div class="section-title">Paket Rate Card</div>' +
-    '<div class="paket-box">' +
-      '<div class="paket-name">' + (inv.paketRateCard || '-') + '</div>' +
-    '</div>' +
-    '<div class="section-title">Nomor Tujuan Transfer</div>' +
-    '<div class="transfer-box">' +
-      '<div class="transfer-icon">🏦</div>' +
-      '<div><div class="transfer-label">Transfer ke</div><div class="transfer-value">' + (inv.nomorTransfer || '-') + '</div></div>' +
-    '</div>' +
-    '<div class="section-title">Syarat &amp; Ketentuan</div>' +
-    '<div class="syarat-box">' + (syarat || 'Tidak ada syarat &amp; ketentuan.') + '</div>' +
-    '<div class="sign-area">' +
-      '<div class="sign-block">' +
-        '<div class="sign-img-wrap"><div style="height:70px"></div></div>' +
-        '<div class="sign-line"></div>' +
-        '<div class="sign-label">Pelanggan<br>' + (inv.namaPelanggan || '') + '</div>' +
-      '</div>' +
-      '<div class="sign-block">' +
-        '<div class="sign-img-wrap">' + creatorSignHtml + '</div>' +
-        '<div class="sign-line"></div>' +
-        '<div class="sign-label">Creator<br>' + creatorName + '</div>' +
-      '</div>' +
-    '</div>' +
-    '<div class="footer"><span>' + inv.invoiceNumber + ' · Digenerate otomatis</span><span>' + creatorName + ' &copy; 2026</span></div>' +
-  '</div></body></html>';
-  
+    var htmlContent = '<!DOCTYPE html><html lang="id"><head><meta charset="UTF-8">' +
+      '<title>Invoice ' + inv.invoiceNumber + '</title>' +
+      '<style>' +
+        'body{margin:0;padding:0;font-family:Arial,sans-serif;font-size:13px;color:#222}' +
+        '.page{max-width:740px;margin:0 auto;padding:40px 44px}' +
+        '.header{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:32px;padding-bottom:20px;border-bottom:3px solid #0090A8}' +
+        '.brand-col h1{margin:0 0 4px;font-size:24px;color:#0090A8;letter-spacing:.02em}' +
+        '.brand-col p{margin:2px 0;font-size:11px;color:#666}' +
+        '.inv-meta{text-align:right}' +
+        '.inv-meta .inv-num{font-size:18px;font-weight:700;color:#0090A8;margin-bottom:4px}' +
+        '.inv-meta p{margin:2px 0;font-size:11px;color:#666}' +
+        '.section-title{font-size:10px;font-weight:800;text-transform:uppercase;letter-spacing:.1em;color:#0090A8;margin:22px 0 8px}' +
+        '.info-box{background:#E5F6FA;border:1px solid #88CEE0;border-radius:8px;padding:14px 18px}' +
+        '.info-row{display:flex;gap:8px;margin-bottom:6px;font-size:13px}' +
+        '.info-row:last-child{margin-bottom:0}' +
+        '.info-label{flex:0 0 150px;color:#666;font-size:12px}' +
+        '.info-value{flex:1;font-weight:600;color:#222}' +
+        '.paket-box{background:#0090A8;color:#fff;border-radius:8px;padding:16px 18px;margin:12px 0}' +
+        '.paket-box .paket-name{font-size:16px;font-weight:700;margin-bottom:4px}' +
+        '.syarat-box{background:#FFFDE7;border:1px solid #FFF59D;border-radius:8px;padding:14px 18px;line-height:1.7;font-size:12px;color:#444}' +
+        '.transfer-box{display:flex;align-items:center;gap:16px;background:#C4EBF4;border:1px solid #88CEE0;border-radius:8px;padding:14px 18px}' +
+        '.transfer-icon{font-size:28px}' +
+        '.transfer-label{font-size:10px;color:#005B6B;font-weight:800;text-transform:uppercase;letter-spacing:.08em}' +
+        '.transfer-value{font-size:15px;font-weight:700;color:#001820;letter-spacing:.04em}' +
+        '.footer{margin-top:40px;padding-top:16px;border-top:1px solid #88CEE0;display:flex;justify-content:space-between;font-size:11px;color:#888}' +
+        '.sign-area{margin-top:48px;display:flex;justify-content:space-between;gap:24px}' +
+        '.sign-block{text-align:center;flex:0 0 200px}' +
+        '.sign-block .sign-img-wrap{min-height:290px;display:flex;align-items:flex-end;justify-content:center;margin-bottom:0}' +
+        '.sign-block .sign-line{width:180px;border-top:1px solid #aaa;margin:6px auto 6px}' +
+        '.sign-block .sign-label{font-size:11px;color:#666}' +
+        '@media print{body{-webkit-print-color-adjust:exact;print-color-adjust:exact}}' +
+      '</style></head><body><div class="page">' +
+        '<div class="header">' +
+          '<div class="brand-col"><h1>' + creatorName + '</h1>' +
+            '<p>Creator Portfolio &amp; Media Kit</p>' +
+            (creatorLocation ? '<p>' + creatorLocation + '</p>' : '') +
+            (creatorEmail ? '<p>' + creatorEmail + '</p>' : '') +
+          '</div>' +
+          '<div class="inv-meta">' +
+            '<div class="inv-num">' + inv.invoiceNumber + '</div>' +
+            '<p>Tanggal Dibuat: ' + createdFormatted + '</p>' +
+          '</div>' +
+        '</div>' +
+        '<div class="section-title">Data Pelanggan</div>' +
+        '<div class="info-box">' +
+          '<div class="info-row"><span class="info-label">Nama Pelanggan</span><span class="info-value">' + (inv.namaPelanggan || '-') + '</span></div>' +
+          '<div class="info-row"><span class="info-label">Tanggal Kerja Sama</span><span class="info-value">' + tanggalFormatted + '</span></div>' +
+        '</div>' +
+        '<div class="section-title">Paket Rate Card</div>' +
+        '<div class="paket-box">' +
+          '<div class="paket-name">' + (inv.paketRateCard || '-') + '</div>' +
+        '</div>' +
+        '<div class="section-title">Nomor Tujuan Transfer</div>' +
+        '<div class="transfer-box">' +
+          '<div class="transfer-icon">🏦</div>' +
+          '<div><div class="transfer-label">Transfer ke</div><div class="transfer-value">' + (inv.nomorTransfer || '-') + '</div></div>' +
+        '</div>' +
+        '<div class="section-title">Syarat &amp; Ketentuan</div>' +
+        '<div class="syarat-box">' + (syarat || 'Tidak ada syarat &amp; ketentuan.') + '</div>' +
+        '<div class="sign-area">' +
+          '<div class="sign-block">' +
+            '<div class="sign-img-wrap"><div style="height:70px"></div></div>' +
+            '<div class="sign-line"></div>' +
+            '<div class="sign-label">Pelanggan<br>' + (inv.namaPelanggan || '') + '</div>' +
+          '</div>' +
+          '<div class="sign-block">' +
+            '<div class="sign-img-wrap">' + creatorSignHtml + '</div>' +
+            '<div class="sign-line"></div>' +
+            '<div class="sign-label">Creator<br>' + creatorName + '</div>' +
+          '</div>' +
+        '</div>' +
+        '<div class="footer"><span>' + inv.invoiceNumber + ' · Digenerate otomatis</span><span>' + creatorName + ' &copy; 2026</span></div>' +
+      '</div></body></html>';
+
     return { success: true, html: htmlContent, invoiceNumber: inv.invoiceNumber };
   } catch (e) {
     Logger.log('generateInvoicePdf error: ' + e);
